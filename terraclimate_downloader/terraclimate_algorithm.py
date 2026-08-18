@@ -24,11 +24,10 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterEnum,
-    QgsProcessingParameterFileDestination,
     QgsProcessingParameterNumber,
+    QgsProcessingParameterRasterDestination,
     QgsProcessingParameterVectorLayer,
     QgsProject,
-    QgsRasterLayer,
     QgsVectorFileWriter,
 )
 
@@ -150,8 +149,8 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
             self.RETRIES, self.tr("Network retries"), integer_type, 3,
             minValue=1, maxValue=10
         ))
-        self.addParameter(QgsProcessingParameterFileDestination(
-            self.OUTPUT, self.tr("Output GeoTIFF"), "GeoTIFF (*.tif *.tiff)"
+        self.addParameter(QgsProcessingParameterRasterDestination(
+            self.OUTPUT, self.tr("Output GeoTIFF"), defaultValue=None
         ))
 
     def processAlgorithm(self, parameters, context, feedback):
@@ -166,7 +165,7 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         stride = self.STRIDES[self.parameterAsEnum(parameters, self.STRIDE, context)]
         buffer_deg = self.parameterAsDouble(parameters, self.BUFFER, context)
         retries = self.parameterAsInt(parameters, self.RETRIES, context)
-        output = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
+        output = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
 
         if end_year < start_year:
             raise QgsProcessingException("End year must be greater than or equal to start year.")
@@ -237,13 +236,11 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    def postProcessAlgorithm(self, context, feedback):
-        return {}
-
     def _layer_bbox_wgs84(self, layer, buffer_deg):
         extent = layer.extent()
-        if layer.crs() != QgsCoordinateReferenceSystem("EPSG:4326"):
-            transform = QgsCoordinateTransform(layer.crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        if layer.crs() != wgs84:
+            transform = QgsCoordinateTransform(layer.crs(), wgs84, QgsProject.instance())
             extent = transform.transformBoundingBox(extent)
         west = max(-180.0, extent.xMinimum() - buffer_deg)
         east = min(180.0, extent.xMaximum() + buffer_deg)
@@ -258,8 +255,7 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         options.driverName = "GPKG"
         options.fileEncoding = "UTF-8"
         options.layerName = "aoi"
-        transform_context = context.transformContext()
-        result = QgsVectorFileWriter.writeAsVectorFormatV3(layer, path, transform_context, options)
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(layer, path, context.transformContext(), options)
         error_code = result[0] if isinstance(result, tuple) else result
         if error_code != QgsVectorFileWriter.NoError:
             raise QgsProcessingException("Could not create temporary AOI cutline: %s" % (result,))
@@ -299,7 +295,6 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
                     feedback.pushInfo("NCSS request: %s" % url.split("?")[0])
                     request = urllib.request.Request(url, headers={"User-Agent": user_agent})
                     with urllib.request.urlopen(request, timeout=180) as response, open(destination, "wb") as handle:
-                        content_type = response.headers.get("Content-Type", "")
                         while True:
                             chunk = response.read(1024 * 1024)
                             if not chunk:
