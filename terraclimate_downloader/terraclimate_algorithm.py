@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Dependency-free TerraClimate downloader for QGIS.
+"""Dependency-safe TerraClimate downloader for QGIS.
 
 Uses Python's standard library for HTTP and QGIS-bundled GDAL for NetCDF/GeoTIFF.
 No xarray, rioxarray, netCDF4, dask, requests, or pip installation is required.
@@ -76,6 +76,10 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         "https://thredds.northwestknowledge.net/thredds/ncss/TERRACLIMATE_ALL/data",
         "http://thredds.northwestknowledge.net:8080/thredds/ncss/TERRACLIMATE_ALL/data",
     ]
+    FILESERVER_BASES = [
+        "https://thredds.northwestknowledge.net/thredds/fileServer/TERRACLIMATE_ALL/data",
+        "http://thredds.northwestknowledge.net:8080/thredds/fileServer/TERRACLIMATE_ALL/data",
+    ]
 
     def tr(self, text):
         return QCoreApplication.translate("TerraClimateDownloadAlgorithm", text)
@@ -87,7 +91,7 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         return "download_terraclimate"
 
     def displayName(self):
-        return self.tr("Download TerraClimate data (dependency-free)")
+        return self.tr("Download TerraClimate data (dependency-safe)")
 
     def group(self):
         return ""
@@ -100,11 +104,11 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Downloads TerraClimate monthly data through the THREDDS NetCDF Subset Service (NCSS), "
-            "clips it to the selected polygon, and writes GeoTIFF. This build deliberately avoids "
-            "xarray/rioxarray/netCDF4/dask and uses the GDAL library already bundled with QGIS. "
-            "For a single year with All months, the output has 12 bands. A year range produces "
-            "bands in chronological order."
+            "Downloads TerraClimate monthly data through THREDDS, clips it to the selected polygon, "
+            "and writes GeoTIFF. NCSS is attempted first; if the subset service is unavailable or "
+            "returns a server error, the plugin falls back to the yearly NetCDF fileServer download. "
+            "This build deliberately avoids xarray/rioxarray/netCDF4/dask and uses the GDAL library "
+            "already bundled with QGIS. For a single year with All months, the output has 12 bands."
         )
 
     def initAlgorithm(self, config=None):
@@ -187,22 +191,49 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
 
                 feedback.pushInfo("Downloading TerraClimate %s for %s…" % (variable, year))
                 nc_path = os.path.join(workdir, "%s_%s.nc" % (variable, year))
-                self._download_ncss(variable, year, bbox, stride, month, nc_path, retries, feedback)
+                source_kind = self._download_year(
+                    variable, year, bbox, stride, nc_path, retries, feedback
+                )
 
                 dataset = self._open_netcdf_variable(nc_path, variable)
                 if dataset is None:
-                    raise QgsProcessingException("GDAL could not open variable '%s' in %s" % (variable, nc_path))
+                    raise QgsProcessingException(
+                        "GDAL could not open variable '%s' in %s" % (variable, nc_path)
+                    )
 
                 band_count = dataset.RasterCount
                 if band_count < 1:
                     raise QgsProcessingException("The downloaded NetCDF contains no raster bands.")
 
-                for band_no in range(1, band_count + 1):
+                if month is not None:
+                    if month > band_count:
+                        raise QgsProcessingException(
+                            "Requested month %d but downloaded dataset has only %d band(s)."
+                            % (month, band_count)
+                        )
+                    band_numbers = [month]
+                else:
+                    band_numbers = list(range(1, band_count + 1))
+
+                feedback.pushInfo(
+                    "Using %s source; processing %d band(s)." % (source_kind, len(band_numbers))
+                )
+
+                for band_no in band_numbers:
                     if feedback.isCanceled():
                         raise QgsProcessingException("Operation canceled.")
-                    raw_tif = os.path.join(workdir, "%s_%s_b%02d_raw.tif" % (variable, year, band_no))
-                    clip_tif = os.path.join(workdir, "%s_%s_b%02d.tif" % (variable, year, band_no))
-                    gdal.Translate(raw_tif, dataset, bandList=[band_no], creationOptions=["COMPRESS=DEFLATE", "TILED=YES"])
+                    raw_tif = os.path.join(
+                        workdir, "%s_%s_b%02d_raw.tif" % (variable, year, band_no)
+                    )
+                    clip_tif = os.path.join(
+                        workdir, "%s_%s_b%02d.tif" % (variable, year, band_no)
+                    )
+                    gdal.Translate(
+                        raw_tif,
+                        dataset,
+                        bandList=[band_no],
+                        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+                    )
                     self._warp_clip(raw_tif, cutline, clip_tif)
                     band_files.append(clip_tif)
 
@@ -255,22 +286,23 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         options.driverName = "GPKG"
         options.fileEncoding = "UTF-8"
         options.layerName = "aoi"
-        result = QgsVectorFileWriter.writeAsVectorFormatV3(layer, path, context.transformContext(), options)
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path, context.transformContext(), options
+        )
         error_code = result[0] if isinstance(result, tuple) else result
         if error_code != QgsVectorFileWriter.NoError:
-            raise QgsProcessingException("Could not create temporary AOI cutline: %s" % (result,))
+            raise QgsProcessingException(
+                "Could not create temporary AOI cutline: %s" % (result,)
+            )
 
-    def _ncss_url(self, base, variable, year, bbox, stride, month):
+    def _ncss_url(self, base, variable, year, bbox, stride):
+        """Build a conservative NCSS request for an individual yearly file.
+
+        TerraClimate yearly files already contain exactly one year, so requesting
+        time=all is both simpler and more robust than a synthetic date range.
+        """
         west, south, east, north = bbox
         filename = "TerraClimate_%s_%s.nc" % (variable, year)
-        if month is None:
-            start = "%04d-01-01T00:00:00Z" % year
-            end = "%04d-12-31T23:59:59Z" % year
-        else:
-            last_day = calendar.monthrange(year, month)[1]
-            start = "%04d-%02d-01T00:00:00Z" % (year, month)
-            end = "%04d-%02d-%02dT23:59:59Z" % (year, month, last_day)
-
         query = urllib.parse.urlencode({
             "var": variable,
             "north": "%.8f" % north,
@@ -278,38 +310,92 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
             "east": "%.8f" % east,
             "west": "%.8f" % west,
             "horizStride": str(stride),
-            "time_start": start,
-            "time_end": end,
+            "time": "all",
             "timeStride": "1",
-            "accept": "netcdf4",
+            "accept": "netcdf",
         })
         return "%s/%s?%s" % (base.rstrip("/"), filename, query)
 
-    def _download_ncss(self, variable, year, bbox, stride, month, destination, retries, feedback):
+    def _fileserver_url(self, base, variable, year):
+        filename = "TerraClimate_%s_%s.nc" % (variable, year)
+        return "%s/%s" % (base.rstrip("/"), filename)
+
+    def _download_year(self, variable, year, bbox, stride, destination, retries, feedback):
+        """Try NCSS first, then fall back to the complete yearly NetCDF file."""
         last_error = None
-        user_agent = "TerraClimate-QGIS-Plugin/1.0 (+https://github.com/Heed725/Terraclimate_Downloader_New_Qgis_Plugin)"
+        user_agent = (
+            "TerraClimate-QGIS-Plugin/1.0.1 "
+            "(+https://github.com/Heed725/Terraclimate_Downloader_New_Qgis_Plugin)"
+        )
+
         for base in self.NCSS_BASES:
-            url = self._ncss_url(base, variable, year, bbox, stride, month)
+            url = self._ncss_url(base, variable, year, bbox, stride)
             for attempt in range(1, retries + 1):
                 try:
                     feedback.pushInfo("NCSS request: %s" % url.split("?")[0])
-                    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
-                    with urllib.request.urlopen(request, timeout=180) as response, open(destination, "wb") as handle:
-                        while True:
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            handle.write(chunk)
-                    if os.path.getsize(destination) < 512:
-                        raise IOError("Server returned an unexpectedly small response.")
-                    feedback.pushInfo("Downloaded %.2f MB" % (os.path.getsize(destination) / 1048576.0))
-                    return
+                    self._download_url(url, destination, user_agent, feedback)
+                    return "NCSS subset"
                 except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
                     last_error = exc
-                    feedback.pushInfo("Attempt %d/%d failed: %s" % (attempt, retries, exc))
+                    feedback.pushInfo(
+                        "NCSS attempt %d/%d failed: %s" % (attempt, retries, exc)
+                    )
                     if attempt < retries:
                         time.sleep(min(2 ** (attempt - 1), 8))
-        raise QgsProcessingException("TerraClimate download failed after retries: %s" % last_error)
+
+        feedback.pushInfo(
+            "NCSS was unavailable. Falling back to the complete yearly TerraClimate NetCDF file."
+        )
+        for base in self.FILESERVER_BASES:
+            url = self._fileserver_url(base, variable, year)
+            for attempt in range(1, retries + 1):
+                try:
+                    feedback.pushInfo("Direct file request: %s" % url)
+                    self._download_url(url, destination, user_agent, feedback)
+                    return "yearly fileServer NetCDF"
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
+                    last_error = exc
+                    feedback.pushInfo(
+                        "Direct-file attempt %d/%d failed: %s" % (attempt, retries, exc)
+                    )
+                    if attempt < retries:
+                        time.sleep(min(2 ** (attempt - 1), 8))
+
+        raise QgsProcessingException(
+            "TerraClimate download failed after NCSS and direct-file retries: %s" % last_error
+        )
+
+    def _download_url(self, url, destination, user_agent, feedback):
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "application/x-netcdf, application/octet-stream, */*",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=240) as response, open(
+            destination, "wb"
+        ) as handle:
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "text/html" in content_type:
+                preview = response.read(500).decode("utf-8", "replace")
+                raise IOError("Server returned HTML instead of NetCDF: %s" % preview[:160])
+
+            downloaded = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if downloaded and downloaded % (25 * 1024 * 1024) < 1024 * 1024:
+                    feedback.pushInfo("Downloaded %.1f MB…" % (downloaded / 1048576.0))
+
+        if not os.path.exists(destination) or os.path.getsize(destination) < 512:
+            raise IOError("Server returned an unexpectedly small response.")
+        feedback.pushInfo(
+            "Downloaded %.2f MB" % (os.path.getsize(destination) / 1048576.0)
+        )
 
     def _open_netcdf_variable(self, nc_path, variable):
         direct_name = 'NETCDF:"%s":%s' % (nc_path, variable)
@@ -321,7 +407,8 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         if container is None:
             return None
         for name, description in container.GetSubDatasets():
-            if name.lower().endswith(":" + variable.lower()) or (":" + variable.lower()) in name.lower():
+            lowered = name.lower()
+            if lowered.endswith(":" + variable.lower()) or (":" + variable.lower()) in lowered:
                 return gdal.Open(name, gdal.GA_ReadOnly)
         if container.RasterCount > 0:
             return container
@@ -339,7 +426,9 @@ class TerraClimateDownloadAlgorithm(QgsProcessingAlgorithm):
         )
         result = gdal.Warp(destination, source, options=options)
         if result is None:
-            raise QgsProcessingException("GDAL failed while clipping the downloaded raster.")
+            raise QgsProcessingException(
+                "GDAL failed while clipping the downloaded raster."
+            )
         result = None
 
     def _set_band_descriptions(self, path, variable, years, month):
