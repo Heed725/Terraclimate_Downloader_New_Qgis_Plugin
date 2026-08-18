@@ -1,11 +1,11 @@
 [general]
 name=TerraClimate Downloader New
 description=Download and clip TerraClimate monthly climate data in QGIS without external Python dependencies.
-version=1.0.0
+version=1.0.1
 qgisMinimumVersion=3.22
 author=Hemed Lungo
 email=
-about=Dependency-safe TerraClimate downloader using THREDDS NCSS, Python standard library networking, and the GDAL library bundled with QGIS. No xarray, rioxarray, netCDF4, dask, requests, or pip installation is required.
+about=Dependency-safe TerraClimate downloader using THREDDS NCSS with direct yearly NetCDF fallback, Python standard library networking, and the GDAL library bundled with QGIS. No xarray, rioxarray, netCDF4, dask, requests, or pip installation is required.
 tracker=https://github.com/Heed725/Terraclimate_Downloader_New_Qgis_Plugin/issues
 repository=https://github.com/Heed725/Terraclimate_Downloader_New_Qgis_Plugin
 homepage=https://github.com/Heed725/Terraclimate_Downloader_New_Qgis_Plugin
