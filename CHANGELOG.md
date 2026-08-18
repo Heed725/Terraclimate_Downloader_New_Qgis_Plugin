@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 — 2026-08-18
+
+- Fixed TerraClimate NCSS HTTP 500 failures by requesting `time=all` for yearly NetCDF files.
+- Changed NCSS output request to the documented `accept=netcdf` format.
+- Month selection is now performed locally from the returned yearly bands, avoiding fragile synthetic date ranges.
+- Added automatic THREDDS `fileServer` fallback when NCSS is unavailable or returns server errors.
+- Added clearer network/download logging and response validation.
+- Added a valid `.pre-commit-config.yaml` so pre-commit.ci no longer fails at configuration discovery.
+- Kept the dependency-safe design: no pip-installed NumPy, xarray, rioxarray, netCDF4, dask, or requests.
+
 ## 1.0.0 — 2026-08-18
 
 - Rebuilt the TerraClimate downloader for QGIS 3.22+.
