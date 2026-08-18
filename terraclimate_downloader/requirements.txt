@@ -1,0 +1,2 @@
+# No pip-installed Python dependencies are required.
+# QGIS supplies PyQt, QGIS APIs, and osgeo.gdal.
