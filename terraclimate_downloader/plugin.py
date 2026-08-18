@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
 
+from qgis.PyQt import QtGui, QtWidgets
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
 from qgis.core import QgsApplication, QgsProcessingProvider
 
 from .terraclimate_algorithm import TerraClimateDownloadAlgorithm
+
+QAction = getattr(QtGui, "QAction", None)
+if QAction is None:
+    QAction = getattr(QtWidgets, "QAction")
 
 
 class TerraClimateProvider(QgsProcessingProvider):
@@ -53,6 +57,5 @@ class TerraClimateDownloaderPlugin:
             self.provider = None
 
     def run(self):
-        self.iface.mainWindow().show()
         import processing
         processing.execAlgorithmDialog("terraclimate_downloader:download_terraclimate")
